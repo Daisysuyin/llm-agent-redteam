@@ -73,3 +73,23 @@ class InjecAgentTests(unittest.TestCase):
         self.assertEqual(tool_names_from_response({"message": {"tool_calls": [
             {"function": {"name": "FakeMailboxSend"}}]}}), ["FakeMailboxSend"])
         self.assertEqual(tool_names_from_response({"message": {}}), [])
+
+    def test_ollama_history_arguments_are_object(self):
+        history = messages_for_case(CASE)
+        fn = history[2]["tool_calls"][0]["function"]
+        self.assertIsInstance(fn["arguments"], dict)
+        self.assertEqual(fn["arguments"]["query"], "rating")
+        self.assertEqual(history[-1]["role"], "tool")
+        self.assertEqual(history[-1]["tool_name"], "FakeSearchResults")
+
+    def test_bad_upstream_parameters_report_error(self):
+        broken = dict(CASE, **{"Tool Parameters": "{bad: invalid"})
+        report = evaluate_cases([broken], TOOLKITS, FakeAdapter())
+        self.assertEqual(report["summary"]["errors"], 1)
+        self.assertEqual(report["summary"]["valid_responses"], 0)
+
+    def test_preserve_no_execution_with_paired_control(self):
+        report = evaluate_cases([CASE], TOOLKITS, FakeAdapter(tool=None),
+                                benign=True)
+        self.assertEqual(report["summary"]["executed_tool_calls"], 0)
+        self.assertEqual(report["summary"]["valid_responses"], 1)

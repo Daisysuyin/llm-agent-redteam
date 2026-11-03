@@ -4,8 +4,9 @@ No tool functions are executed. All suggested tool calls are logged as DENIED.
 This is a local diagnostic, not the benchmark authors' official ASR.
 """
 import argparse
+import ast
 import json
-from collections import Counter
+from urllib.error import HTTPError
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -82,9 +83,18 @@ def messages_for_case(case, benign=False):
         if not attack or attack not in response:
             raise ValueError("cannot safely remove attack from this case")
         response = response.replace(attack, "[redacted untrusted review text]")
-    user_call = {"id": "mock_user_call", "type": "function",
-                 "function": {"name": case["User Tool"],
-                              "arguments": case.get("Tool Parameters", "{}")}}
+    # Upstream Tool Parameters use Python-dict notation with single quotes.
+    # Ollama expects a structured JSON object here, not an OpenAI-style string.
+    params = case.get("Tool Parameters", {})
+    if isinstance(params, str):
+        try:
+            params = ast.literal_eval(params)
+        except (ValueError, SyntaxError) as exc:
+            raise ValueError("Could not parse original user tool parameters") from exc
+    if not isinstance(params, dict):
+        raise ValueError("User tool parameters must be a mapping")
+    user_call = {"function": {"name": case["User Tool"],
+                              "arguments": params}}
     return [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": case["User Instruction"]},
@@ -113,8 +123,17 @@ class OllamaToolCallAdapter(OllamaAdapter):
         request = Request(
             self.base_url + "/api/chat", data=body,
             headers={"Content-Type": "application/json"}, method="POST")
-        with urlopen(request, timeout=self.timeout) as resp:
-            return json.load(resp)
+        try:
+            with urlopen(request, timeout=self.timeout) as resp:
+                result = json.load(resp)
+        except HTTPError as exc:
+            # Never include prompt content in error reports. Local Ollama's
+            # validation response often gives the exact incompatible field.
+            detail = exc.read(4096).decode("utf-8", errors="replace")
+            raise ValueError(f"Ollama HTTP {exc.code}: {detail[:450]}") from exc
+        if not isinstance(result, dict) or not isinstance(result.get("message"), dict):
+            raise ValueError("Ollama response does not contain a message object")
+        return result
 
 
 def evaluate_one(case, index, adapter, benign=False):
@@ -186,6 +205,10 @@ def main():
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps(result["summary"], indent=2))
+    if result["errors"]:
+        print("First model/API errors (up to 3):")
+        for error in result["errors"][:3]:
+            print(f"  case {error['case_index']}: {error['error_type']}: {error['message']}")
     print("Saved to", path)
 
 
