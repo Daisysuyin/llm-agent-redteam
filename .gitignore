@@ -2,3 +2,6 @@ __pycache__/
 *.pyc
 .venv/
 reports/
+
+# Third-party benchmark corpora (download locally; do not redistribute)
+external_data/
